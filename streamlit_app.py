@@ -1,184 +1,120 @@
-import streamlit as st
+import io
+from pathlib import Path
+from typing import Dict, Set, List
+
 import pandas as pd
-import re
-import unicodedata
+import streamlit as st
 
-"""
-Streamlit app: Keyword Dictionary Classifier
+###############################################################################
+# Streamlit – Marketing Keyword Classifier                                   #
+###############################################################################
+st.set_page_config(page_title="Marketing Keyword Classifier", layout="wide")
+st.title("📈 Marketing Keyword Classifier")
 
-Updates (2025-07-28, rev 2)
----------------------------
-* **Whole-word/phrase matching** with robust Unicode-normalized regex (no accidental substring hits).
-* Added **personalized_service_product** category (keywords: *custom*, *monogram*).
-* Re-used Python-style list for **Label** column (`['exclusive', 'limited']`).
-* Helper `normalize()` now removes accents, unifies punctuation & hyphens before matching.
-"""
+# ---------------------------------------------------------------------------
+# 🛠️ Sidebar – Upload & Configuration
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.header("🗂️ 1. Upload Your CSV")
+    uploaded_file = st.file_uploader("CSV file with a 'Statement' column", type=["csv"])
 
-# -------------------------------
-# Default keyword dictionaries – extend or modify these as needed
-# -------------------------------
-DEFAULT_DICTIONARIES: dict[str, set[str]] = {
-    "urgency_marketing": {
-        "limited", "limited time", "limited run", "limited edition", "order now",
-        "last chance", "hurry", "while supplies last", "before they're gone",
-        "selling out", "selling fast", "act now", "don't wait", "today only",
-        "expires soon", "final hours", "almost gone",
-    },
-    "exclusive_marketing": {
-        "exclusive", "exclusively", "exclusive offer", "exclusive deal", "members only",
-        "vip", "special access", "invitation only", "premium", "privileged",
-        "limited access", "select customers", "insider", "private sale", "early access",
-    },
-    "personalized_service_product": {
-        "custom", "monogram",
-    },
-}
+    st.markdown("---")
+    st.header("🔧 2. Configure Dictionaries")
 
-# -------------------------------
-# Helper functions
-# -------------------------------
+    # Default marketing keyword dictionaries
+    default_dicts: Dict[str, Set[str]] = {
+        "urgency_marketing": {
+            "limited", "limited time", "limited run", "limited edition", "order now",
+            "last chance", "hurry", "while supplies last", "before they're gone",
+            "selling out", "selling fast", "act now", "don't wait", "today only",
+            "expires soon", "final hours", "almost gone",
+        },
+        "exclusive_marketing": {
+            "exclusive", "exclusively", "exclusive offer", "exclusive deal",
+            "members only", "vip", "special access", "invitation only",
+            "premium", "privileged", "limited access", "select customers",
+            "insider", "private sale", "early access",
+        },
+    }
 
-def normalize(text: str) -> str:
-    """Lower-case, strip accents, unify dash/quote punctuation so regex matches are robust."""
-    text = unicodedata.normalize("NFKD", text)
-    text = re.sub(r"[–—-]", " ", text)          # dashes → space
-    text = re.sub(r"[’‘`]", "'", text)           # curly quotes → straight
-    text = re.sub(r"[!?.,:;()\[\]]", " ", text) # punct → space
-    return text.lower()
+    # Load edited or new dictionaries into this object
+    current_dicts: Dict[str, Set[str]] = {}
 
+    for label, keywords in default_dicts.items():
+        kw_text = "\n".join(sorted(keywords))
+        new_kw_text = st.text_area(
+            f"Keywords for **{label}** (one per line)", kw_text, key=label
+        )
+        kw_set = {kw.strip().lower() for kw in new_kw_text.split("\n") if kw.strip()}
+        if kw_set:
+            current_dicts[label] = kw_set
 
-def _phrase_to_regex(phrase: str) -> str:
-    """Convert a keyword phrase into a word-boundary regex pattern supporting flexible whitespace."""
-    escaped = re.escape(phrase.lower())
-    spaced = re.sub(r"\\\s+", r"\\s+", escaped)  # keep escaped \s+ intact if term already uses it
-    spaced = spaced.replace(" ", r"\\s+")           # replace literal spaces with \s+
-    return rf"\\b{spaced}\\b"
+    # Section to add a completely new category
+    st.markdown("---")
+    st.subheader("➕ Add New Category")
+    new_label = st.text_input("New category name (alphanumeric and underscores)")
+    new_kw_input = st.text_area("Keywords for new category (one per line)")
+    if new_label and new_kw_input:
+        new_kw_set = {kw.strip().lower() for kw in new_kw_input.split("\n") if kw.strip()}
+        if new_kw_set:
+            current_dicts[new_label.strip().lower()] = new_kw_set
 
+    st.markdown("---")
+    one_hot = st.checkbox("Add one‑hot encoded columns", value=True)
 
-def find_keywords(text: str, terms: set[str]) -> list[str]:
-    """Return sorted list of *terms* present in *text* as whole words/phrases (case-insensitive)."""
-    text_norm = normalize(text)
-    matches: list[str] = []
-    for term in terms:
-        pattern = _phrase_to_regex(term)
-        if re.search(pattern, text_norm):
-            matches.append(term)
-    return sorted(matches)
+###############################################################################
+# Helper – Classification Function
+###############################################################################
 
+def classify_statement(text: str, dictionaries: Dict[str, Set[str]]) -> List[str]:
+    """Return list of dictionary names whose keywords appear in *text*."""
+    text_lower = text.lower()
+    matched: List[str] = []
+    for label, keywords in dictionaries.items():
+        if any(kw in text_lower for kw in keywords):
+            matched.append(label)
+    return matched
 
-def classify_dataframe(df: pd.DataFrame, text_col: str, dictionaries: dict[str, set[str]]) -> pd.DataFrame:
-    """Return *df* with added classification columns based on *dictionaries*.
+###############################################################################
+# 🚀 Main – Run Classification & Display Results
+###############################################################################
 
-    * **Label**: list-style string of all matches, e.g. `['exclusive', 'limited']`
-    * One column per dictionary category: semicolon-separated matches for that category
-    """
-    df_result = df.copy()
-    df_result["Label"] = "[]"  # default list representation
+def run_classifier(file_buffer: io.BytesIO, dictionaries: Dict[str, Set[str]]):
+    df = pd.read_csv(file_buffer)
 
-    # Ensure all category columns exist
-    for cat in dictionaries:
-        if cat not in df_result.columns:
-            df_result[cat] = ""
+    if "Statement" not in df.columns:
+        st.error("❌ The uploaded CSV must contain a column named 'Statement'.")
+        return
 
-    for idx, text in df_result[text_col].items():
-        all_matches: set[str] = set()
-        for cat, terms in dictionaries.items():
-            kw_matches = find_keywords(str(text), terms)
-            df_result.at[idx, cat] = ";".join(kw_matches)
-            all_matches.update(kw_matches)
-        df_result.at[idx, "Label"] = str(sorted(all_matches))
-    return df_result
+    # Classify
+    with st.spinner("Classifying statements…"):
+        df["labels"] = df["Statement"].astype(str).apply(classify_statement, dictionaries=dictionaries)
+        if one_hot:
+            for label in dictionaries:
+                df[label] = df["labels"].apply(lambda cats, lbl=label: lbl in cats)
 
+    st.success("✅ Classification complete!")
 
-def parse_keywords(text: str) -> set[str]:
-    """Convert comma- or newline-separated keywords into a set of stripped, lower-cased terms."""
-    if not text:
-        return set()
-    parts = [p.strip().lower() for p in text.replace("\n", ",").split(",")]
-    return {p for p in parts if p}
+    # Preview
+    st.subheader("🔍 Preview (first 10 rows)")
+    st.dataframe(df.head(10), use_container_width=True)
 
-
-# -------------------------------
-# Streamlit app
-# -------------------------------
-
-def main() -> None:
-    st.set_page_config(page_title="Dictionary Classification", page_icon="🗂️", layout="wide")
-    st.title("🗂️ Keyword Dictionary Classifier")
-
-    st.markdown(
-        """Upload a CSV, choose the text column, tweak your dictionaries, and download a
-        classified version. Matching is **whole-word**, Unicode-normalized (e.g. accented
-        characters & dashes handled).  
-        **Label** column lists all matched keywords per row, keeping Python list syntax.
-        """
+    # Download
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download classified CSV",
+        data=csv_bytes,
+        file_name="classified_output.csv",
+        mime="text/csv",
     )
 
-    # 1️⃣ Upload section
-    uploaded_file = st.file_uploader("**Upload your CSV**", type=["csv"], help="CSV only – no Excel files.")
-    if uploaded_file is None:
-        st.info("Awaiting CSV upload …")
-        st.stop()
-
-    # Load CSV
+###############################################################################
+# 🏁 App Execution
+###############################################################################
+if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file)
-    except Exception as exc:
-        st.error(f"Failed to read CSV – {exc}")
-        st.stop()
-
-    # 2️⃣ Pick text column
-    text_cols = df.select_dtypes(include=["object"]).columns.tolist()
-    if not text_cols:
-        st.error("No string columns detected in your CSV.")
-        st.stop()
-
-    text_col = st.selectbox("Select the text column to classify", text_cols, index=0)
-
-    # 3️⃣ Dictionary editor
-    st.subheader("Keyword dictionaries")
-
-    if "dictionaries" not in st.session_state:
-        st.session_state.dictionaries = {k: v.copy() for k, v in DEFAULT_DICTIONARIES.items()}
-
-    dictionaries = st.session_state.dictionaries
-    updated_dicts: dict[str, set[str]] = {}
-
-    for cat, terms in dictionaries.items():
-        with st.expander(f"Category: {cat}"):
-            term_text = st.text_area(
-                "Comma- or newline-separated keywords", value="\n".join(sorted(terms)), key=f"ta_{cat}"
-            )
-            updated_dicts[cat] = parse_keywords(term_text)
-
-    # ➕ Add new category
-    with st.expander("➕ Add new category"):
-        new_cat_name = st.text_input("Category name", key="new_cat_name")
-        new_cat_terms = st.text_area("Keywords", key="new_cat_terms")
-        if new_cat_name:
-            updated_dicts[new_cat_name] = parse_keywords(new_cat_terms)
-
-    # 🚀 Run classification
-    if st.button("Run classification"):
-        st.session_state.dictionaries = updated_dicts  # persist changes
-        result_df = classify_dataframe(df, text_col, st.session_state.dictionaries)
-        st.success("Classification complete!")
-
-        # Preview first 20 rows
-        st.subheader("Preview (first 20 rows)")
-        st.dataframe(result_df.head(20), use_container_width=True)
-
-        # Download full CSV
-        csv_buf = result_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download classified CSV",
-            data=csv_buf,
-            file_name="classified_data.csv",
-            mime="text/csv",
-        )
-
-
-if __name__ == "__main__":
-    main()
-
-
+        run_classifier(uploaded_file, current_dicts)
+    except Exception as e:
+        st.exception(e)
+else:
+    st.info("👆 Upload a CSV file to get started.")
