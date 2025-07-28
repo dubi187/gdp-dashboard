@@ -1,151 +1,185 @@
-import streamlit as st
-import pandas as pd
-import math
+# dictionary_classification_streamlit_app.py
+# -----------------------------------------------------------------------------
+# Streamlit app that classifies marketing statements in an uploaded CSV file
+# based on configurable keyword dictionaries. Users can edit the dictionaries
+# directly in the UI (JSON format) and download the result as a new CSV.
+# -----------------------------------------------------------------------------
+
+import json
+from io import StringIO
 from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+import pandas as pd
+import streamlit as st
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# ------------------------ DEFAULT CONFIGURATION -------------------------------
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+DEFAULT_DICTIONARIES = {
+    "urgency_marketing": {
+        "limited",
+        "limited time",
+        "limited run",
+        "limited edition",
+        "order now",
+        "last chance",
+        "hurry",
+        "while supplies last",
+        "before they're gone",
+        "selling out",
+        "selling fast",
+        "act now",
+        "don't wait",
+        "today only",
+        "expires soon",
+        "final hours",
+        "almost gone",
+    },
+    "exclusive_marketing": {
+        "exclusive",
+        "exclusively",
+        "exclusive offer",
+        "exclusive deal",
+        "members only",
+        "vip",
+        "special access",
+        "invitation only",
+        "premium",
+        "privileged",
+        "limited access",
+        "select customers",
+        "insider",
+        "private sale",
+        "early access",
+    },
+}
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# ----------------------------- HELPER FUNCTIONS ------------------------------
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def classify_statement(text: str, dictionaries: dict[str, set[str]]) -> str:
+    """Return a semicolon‑separated list of dictionary labels found in *text*.
+    If no keywords match, returns "none"."""
+    text_lower = str(text).lower()
+    matches = [
+        label
+        for label, terms in dictionaries.items()
+        if any(term in text_lower for term in terms)
+    ]
+    return ";".join(matches) if matches else "none"
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+
+@st.cache_data(show_spinner=False)
+def parse_uploaded_csv(uploaded_file) -> pd.DataFrame | None:
+    """Read uploaded CSV into a DataFrame, return None on failure."""
+    try:
+        return pd.read_csv(uploaded_file)
+    except Exception as e:  # pylint: disable=broad-except
+        st.error(f"❌ Failed to read CSV: {e}")
+        return None
+
+
+# ------------------------------ STREAMLIT UI ---------------------------------
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Dictionary‑Based Statement Classifier",
+        page_icon="📑",
+        layout="wide",
+        initial_sidebar_state="collapsed",
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    st.title("📑 Dictionary‑Based Statement Classifier")
+    st.markdown(
+        """
+        Upload a CSV file that contains a **`Statement`** column. The app will
+        classify each statement based on the keyword dictionaries you provide
+        (or edit below) and let you download the augmented file.
+        """
+    )
 
-    return gdp_df
+    # --------------------------- Upload Section -----------------------------
 
-gdp_df = get_gdp_data()
+    uploaded_file = st.file_uploader(
+        "1️⃣ Upload your CSV file", type=["csv"], accept_multiple_files=False
+    )
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    # ---------------------- Dictionary Editor Section -----------------------
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+    with st.expander("2️⃣ Edit keyword dictionaries (JSON)", expanded=False):
+        st.markdown(
+            "Each **key** becomes a category label. The **value** for each key is a list of keyword strings.\n"
+            "If a keyword appears anywhere in a statement (case‑insensitive), the corresponding label is assigned."
         )
+
+        default_json = json.dumps({k: sorted(v) for k, v in DEFAULT_DICTIONARIES.items()}, indent=2)
+        dict_text = st.text_area("Dictionaries JSON", value=default_json, height=300, key="dict_area")
+
+        # Attempt to parse JSON input
+        try:
+            user_dict_raw = json.loads(dict_text)
+            # Convert lists back to sets for faster lookup
+            user_dict: dict[str, set[str]] = {
+                label: set(map(str.lower, terms)) for label, terms in user_dict_raw.items()
+            }
+            dict_is_valid = True
+        except json.JSONDecodeError as e:
+            st.error(f"❌ Invalid JSON: {e.msg}")
+            dict_is_valid = False
+            user_dict = {}
+
+    # ------------------------- Classification Button ------------------------
+
+    run_button_disabled = not (uploaded_file and dict_is_valid)
+    if st.button("3️⃣ Run Classification", disabled=run_button_disabled, use_container_width=True):
+        if not uploaded_file:
+            st.warning("Please upload a CSV file first.")
+            st.stop()
+
+        df = parse_uploaded_csv(uploaded_file)
+        if df is None:
+            st.stop()
+
+        if "Statement" not in df.columns:
+            st.error("❌ The uploaded CSV must contain a 'Statement' column.")
+            st.stop()
+
+        # Perform classification
+        with st.spinner("Classifying statements..."):
+            df["Category"] = df["Statement"].apply(lambda s: classify_statement(s, user_dict))
+
+        st.success("🎉 Classification complete!")
+
+        # Show preview
+        st.subheader("Preview of classified data")
+        st.dataframe(df.head(50), use_container_width=True)
+
+        # Prepare download
+        csv_buffer = StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_content = csv_buffer.getvalue().encode("utf‑8")
+        st.download_button(
+            "⬇️ Download full classified CSV",
+            data=csv_content,
+            file_name="classified_data.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        # Optionally cache full result so user can explore further without rerun
+        st.session_state["last_result_df"] = df
+
+    # ---------------------- Optional Result Exploration ---------------------
+
+    if "last_result_df" in st.session_state:
+        with st.expander("🔍 Explore previous results", expanded=False):
+            result_df: pd.DataFrame = st.session_state["last_result_df"]
+            st.dataframe(result_df, use_container_width=True)
+
+            # Simple category count visualization
+            category_counts = result_df["Category"].value_counts().sort_values(ascending=False)
+            st.bar_chart(category_counts)
+
+
+if __name__ == "__main__":
+    main()
+
